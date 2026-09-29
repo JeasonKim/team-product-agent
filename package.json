@@ -1,0 +1,53 @@
+{
+  "name": "team-product-agent",
+  "version": "0.1.0",
+  "description": "运行在 Mac 上的团队研发 Agent，通过飞书协作，支持 Codex 与 Claude Agent SDK。",
+  "license": "MIT",
+  "author": "JeasonKim",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JeasonKim/team-product-agent.git"
+  },
+  "homepage": "https://github.com/JeasonKim/team-product-agent#readme",
+  "bugs": "https://github.com/JeasonKim/team-product-agent/issues",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.11.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/src/cli.js",
+    "serve": "node dist/src/cli.js serve --feishu",
+    "admin": "node dist/src/cli.js admin",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src test",
+    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm build"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.283",
+    "@larksuiteoapi/node-sdk": "1.74.0",
+    "@openai/codex-sdk": "0.158.0",
+    "better-sqlite3": "13.0.3",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "^22.20.4",
+    "eslint": "10.11.0",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.70.1",
+    "vitest": "5.0.2"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "cases": [
+    {
+      "id": "existing-regression",
+      "split": "regression",
+      "request": "将这里替换成一个团队过去真实提过的普通需求。",
+      "expected": "ready",
+      "acceptance": { "argv": ["node", "/absolute/path/to/independent-acceptance.mjs"], "timeoutMs": 60000 }
+    },
+    {
+      "id": "unseen-boundary",
+      "split": "holdout",
+      "request": "将这里替换成没有参与经验调优的场景，例如确实需要改变产品权限模型的需求。",
+      "expected": "architecture"
+    }
+  ]
+}

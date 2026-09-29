@@ -1,0 +1,34 @@
+{
+  "cases": [
+    {
+      "id": "recent-first",
+      "split": "regression",
+      "request": "订单列表按创建时间从新到旧排序，时间相同保持原顺序，不修改原数组；不要修改价格和空订单提示。",
+      "expected": "ready",
+      "acceptance": {
+        "argv": [
+          "node",
+          "--input-type=module",
+          "-e",
+          "import assert from 'node:assert/strict'; import {orderList,formatPrice,emptyOrderMessage} from './product.mjs'; const xs=[{id:'early',createdAt:'2026-01-01T01:00:00+08:00'},{id:'late-a',createdAt:'2026-01-01T00:00:00Z'},{id:'late-b',createdAt:'2025-12-31T19:00:00-05:00'}]; const before=JSON.stringify(xs); assert.deepEqual(orderList(xs).map(x=>x.id),[\"late-a\",\"late-b\",\"early\"]); assert.equal(JSON.stringify(xs),before); assert.notEqual(orderList(xs),xs); assert.deepEqual(orderList([]),[]); assert.equal(formatPrice(12.5),'12.5'); assert.equal(emptyOrderMessage(),'暂无记录'); console.log('排序、时区、稳定性、原数组和无关行为独立验收通过');"
+        ],
+        "timeoutMs": 10000
+      }
+    },
+    {
+      "id": "oldest-first",
+      "split": "holdout",
+      "request": "订单列表改成按创建时间从旧到新排列，时间相同保持原顺序，不修改原数组。价格和空订单提示保持当前行为。",
+      "expected": "ready",
+      "acceptance": {
+        "argv": [
+          "node",
+          "--input-type=module",
+          "-e",
+          "import assert from 'node:assert/strict'; import {orderList,formatPrice,emptyOrderMessage} from './product.mjs'; const xs=[{id:'early',createdAt:'2026-01-01T01:00:00+08:00'},{id:'late-a',createdAt:'2026-01-01T00:00:00Z'},{id:'late-b',createdAt:'2025-12-31T19:00:00-05:00'}]; const before=JSON.stringify(xs); assert.deepEqual(orderList(xs).map(x=>x.id),[\"early\",\"late-a\",\"late-b\"]); assert.equal(JSON.stringify(xs),before); assert.notEqual(orderList(xs),xs); assert.deepEqual(orderList([]),[]); assert.equal(formatPrice(12.5),'12.5'); assert.equal(emptyOrderMessage(),'暂无记录'); console.log('排序、时区、稳定性、原数组和无关行为独立验收通过');"
+        ],
+        "timeoutMs": 10000
+      }
+    }
+  ]
+}

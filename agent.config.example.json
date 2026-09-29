@@ -1,0 +1,56 @@
+{
+  "dataDirectory": "./data",
+  "localActorId": "local-owner",
+  "maxIterations": 3,
+  "runTimeoutMs": 600000,
+  "projects": [
+    {
+      "id": "product",
+      "name": "团队产品",
+      "repository": "/absolute/path/to/product",
+      "engine": "codex",
+      "authentication": {
+        "codex": "api_key",
+        "claude": "api_key"
+      },
+      "models": {},
+      "requesterIds": [],
+      "ownerIds": [
+        "local-owner"
+      ],
+      "chatIds": [],
+      "setup": [],
+      "checks": [
+        {
+          "name": "产品回归",
+          "argv": [
+            "pnpm",
+            "test"
+          ],
+          "timeoutMs": 120000
+        }
+      ],
+      "sensitivePaths": [
+        "db/",
+        "migrations/",
+        ".github/",
+        "package.json",
+        "pnpm-lock.yaml",
+        "AGENTS.md",
+        ".claude/",
+        ".codex/"
+      ],
+      "efforts": {},
+      "autoEvaluate": false
+    }
+  ],
+  "profile": {
+    "name": "研发分身",
+    "role": "帮助团队产品和运营完成已有产品的改进",
+    "style": "用业务语言简洁沟通，给出结果和下一步。",
+    "preferences": "优先复用现有模型；日常改动自主实现并验证；架构与权限边界交负责人审定。"
+  },
+  "notifications": {
+    "groupMode": "private"
+  }
+}
