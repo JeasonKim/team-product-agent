@@ -1,13 +1,16 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { z } from 'zod';
+import { basename, dirname } from 'node:path';
+import { stat } from 'node:fs/promises';
 import type { IncomingMessage, Notification } from '../domain/model.js';
+import { MAX_ATTACHMENT_BYTES, type Attachment } from '../domain/attachments.js';
 import { minimalEnvironment } from '../infra/process.js';
-import { parseFeishuMessage } from './messages.js';
+import { messageTime, parseFeishuMessage } from './messages.js';
 
 const cliEvent = z.object({
   type: z.literal('im.message.receive_v1'), message_id: z.string().min(1),
   sender_id: z.string().min(1), sender_type: z.literal('user'), chat_id: z.string().min(1),
-  chat_type: z.enum(['group', 'p2p']), message_type: z.literal('text'), content: z.string(),
+  chat_type: z.enum(['group', 'p2p']), message_type: z.string(), content: z.string(),
   create_time: z.union([z.string(), z.number()]).transform(String).optional(),
   mentions: z.array(z.object({ key: z.string(), id: z.string(), name: z.string().optional() })).optional(), reply_to: z.string().optional(),
 });
@@ -15,6 +18,11 @@ export function parseLarkCliMessage(raw: unknown, botId?: string): IncomingMessa
   const result = cliEvent.safeParse(raw);
   if (!result.success) return null;
   const event = result.data;
+  if (event.message_type !== 'text') {
+    const addressed = !!botId && !!event.mentions?.some(mention => mention.id === botId);
+    if (event.chat_type === 'group' && !addressed && !event.reply_to) return null;
+    return { id: event.message_id, actorId: event.sender_id, chatId: event.chat_id, chatType: event.chat_type, text: '', replyTo: event.reply_to ?? null, createdAt: messageTime(event.create_time), messageType: event.message_type, needsHydration: true, ...(event.chat_type === 'group' && !addressed ? { addressedToBot: false } : {}) };
+  }
   let content = event.content;
   for (const mention of event.mentions ?? []) {
     if (mention.id === botId && mention.name) content = content.replaceAll(`@${mention.name}`, '');
@@ -30,11 +38,54 @@ export class LarkCliTransport {
   private closing = false;
   private closed = false;
   constructor(private readonly profile: string, private readonly botId?: string, private readonly executable = process.env.FEISHU_CLI_PATH || 'lark-cli') {}
-  private launch(args: string[]): ChildProcessWithoutNullStreams {
+  private launch(args: string[], cwd?: string): ChildProcessWithoutNullStreams {
     const env = minimalEnvironment({ LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' });
     // 凭证仍由 CLI 的系统密钥链管理，不读取或复制应用密钥。
     if (process.env.HOME) env.HOME = process.env.HOME;
-    return spawn(this.executable, ['--profile', this.profile, ...args], { shell: false, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    return spawn(this.executable, ['--profile', this.profile, ...args], { shell: false, env, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+  }
+  private async command(args: string[], signal: AbortSignal, cwd?: string, destination?: string): Promise<unknown> {
+    signal.throwIfAborted();
+    const child = this.launch(args, cwd); child.stdin.end();
+    return new Promise((resolve, reject) => {
+      let output = ''; let diagnostics = ''; let reason: Error | undefined;
+      let killTimer: NodeJS.Timeout | undefined;
+      const stop = (error: Error) => {
+        if (reason) return;
+        reason = error; child.kill('SIGTERM');
+        killTimer = setTimeout(() => child.kill('SIGKILL'), 2000); killTimer.unref();
+      };
+      const abort = () => stop(new Error('附件读取已取消'));
+      const timer = setTimeout(() => stop(new Error('飞书附件读取超时，请稍后重发')), 60_000);
+      const sizeTimer = destination ? setInterval(() => { void stat(destination).then(info => { if (info.size > MAX_ATTACHMENT_BYTES) stop(new Error('附件超过 20 MB，请压缩后发送')); }).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') stop(new Error('无法检查附件下载大小')); }); }, 50) : undefined;
+      const cleanup = () => { clearTimeout(timer); clearTimeout(killTimer); clearInterval(sizeTimer); signal.removeEventListener('abort', abort); };
+      signal.addEventListener('abort', abort, { once: true });
+      child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (chunk: string) => { output += chunk; if (output.length > 1_000_000) { output = ''; stop(new Error('飞书消息内容过长')); } });
+      child.stderr.on('data', (chunk: string) => { diagnostics = (diagnostics + chunk).slice(-4000); });
+      child.once('error', error => { cleanup(); reject(error); });
+      child.once('close', code => {
+        cleanup();
+        try {
+          if (reason) throw reason;
+          if (code !== 0) {
+            let message = '飞书文件读取失败，请确认机器人有消息读取权限（im:message:readonly），并仍可访问原消息';
+            try { const parsed = JSON.parse(diagnostics); if (parsed.error?.message) message += `：${String(parsed.error.message).slice(0, 300)}`; }
+            catch { console.warn('飞书 CLI 返回非 JSON 错误，使用通用提示', { exitCode: code }); }
+            throw new Error(message);
+          }
+          const result = z.object({ ok: z.literal(true), data: z.unknown() }).parse(JSON.parse(output));
+          resolve(result.data);
+        } catch (error) { reject(error); }
+      });
+    });
+  }
+  async messageContent(messageId: string, signal: AbortSignal): Promise<unknown> {
+    // CLI 的展示消息会丢失富文本结构，使用官方原始接口取得资源键。
+    return this.command(['api', 'GET', `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`, '--as', 'bot', '--params', JSON.stringify({ user_id_type: 'open_id' })], signal);
+  }
+  async download(item: Attachment, destination: string, signal: AbortSignal): Promise<void> {
+    await this.command(['im', '+messages-resources-download', '--as', 'bot', '--message-id', item.messageId, '--file-key', item.key, '--type', item.kind, '--output', basename(destination)], signal, dirname(destination), destination);
   }
   async connect(receive: (message: IncomingMessage) => void, onFailure: (error: Error) => void): Promise<void> {
     const child = this.launch(['event', 'consume', 'im.message.receive_v1', '--as', 'bot']);

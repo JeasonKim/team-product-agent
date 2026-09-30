@@ -2,6 +2,23 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { AgentStore } from '../infra/store.js';
 import { parseFeishuMessage } from './messages.js';
 import { LarkCliTransport } from './lark-cli.js';
+import { z } from 'zod';
+import { open } from 'node:fs/promises';
+import { addAbortSignal } from 'node:stream';
+import { feishuContent } from './feishu-content.js';
+import type { IncomingMessage } from '../domain/model.js';
+import { MAX_ATTACHMENT_BYTES, type Attachment } from '../domain/attachments.js';
+import type { AttachmentLibrary } from '../infra/attachments.js';
+
+export function hydrateMessage(message: IncomingMessage, raw: unknown): IncomingMessage {
+  const envelope = z.object({ code: z.number().optional(), data: z.unknown().optional(), items: z.unknown().optional() }).passthrough().parse(raw);
+  if (envelope.code !== undefined && envelope.code !== 0) throw new Error('飞书原始消息读取失败');
+  const result = z.object({ items: z.array(z.object({ message_id: z.string(), chat_id: z.string(), msg_type: z.string(), deleted: z.boolean().optional(), sender: z.object({ id: z.string(), sender_type: z.literal('user') }), body: z.object({ content: z.string() }) })) }).parse(envelope.data ?? envelope);
+  const source = message.source ?? { messageId: message.id, chatId: message.chatId };
+  const item = result.items.find(item => item.message_id === source.messageId);
+  if (!item || item.deleted || item.chat_id !== source.chatId || item.sender.id !== message.actorId) throw new Error('原消息已不可用或发送者、聊天归属不一致，请重新发送');
+  return { ...message, ...feishuContent(item.msg_type, item.body.content, source.messageId, process.env.FEISHU_BOT_OPEN_ID), needsHydration: false };
+}
 
 export class FeishuGateway {
   private readonly client?: lark.Client;
@@ -12,7 +29,9 @@ export class FeishuGateway {
     const appId = process.env.FEISHU_APP_ID;
     const appSecret = process.env.FEISHU_APP_SECRET;
     if (!appId || !appSecret) throw new Error('缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET');
-    this.client = new lark.Client({ appId, appSecret, appType: lark.AppType.SelfBuild, domain: lark.Domain.Feishu, loggerLevel: lark.LoggerLevel.error });
+    const httpInstance = Object.create(lark.defaultHttpInstance) as lark.HttpInstance;
+    httpInstance.request = <T = unknown, R = T, D = unknown>(options: lark.HttpRequestOptions<D>) => lark.defaultHttpInstance.request({ ...options, timeout: 60_000 }) as Promise<R>;
+    this.client = new lark.Client({ appId, appSecret, httpInstance, appType: lark.AppType.SelfBuild, domain: lark.Domain.Feishu, loggerLevel: lark.LoggerLevel.error });
     this.socket = new lark.WSClient({ appId, appSecret, domain: lark.Domain.Feishu, loggerLevel: lark.LoggerLevel.error });
   }
   async connect(onFailure: (error: Error) => void): Promise<void> {
@@ -25,6 +44,29 @@ export class FeishuGateway {
       },
     });
     await this.socket!.start({ eventDispatcher });
+  }
+  async prepareMessage(original: IncomingMessage, library: AttachmentLibrary, signal: AbortSignal): Promise<IncomingMessage> {
+    let message = original;
+    if (message.needsHydration) {
+      if (!['image', 'file', 'post'].includes(message.messageType ?? '')) return { ...message, needsHydration: false, problem: '暂不支持这类消息，请改发文字、截图或参考文档。' };
+      message = hydrateMessage(message, await this.cli!.messageContent(message.source?.messageId ?? message.id, signal));
+    }
+    if (message.problem || !message.attachments?.length) return message;
+    return { ...message, attachments: await library.receive(message.attachments, (item, path, signal) => this.download(item, path, signal), signal) };
+  }
+  private async download(item: Attachment, destination: string, signal: AbortSignal): Promise<void> {
+    if (this.cli) return this.cli.download(item, destination, signal);
+    signal.throwIfAborted();
+    const result = await this.client!.im.messageResource.get({ path: { message_id: item.messageId, file_key: item.key }, params: { type: item.kind } });
+    const stream = addAbortSignal(AbortSignal.any([signal, AbortSignal.timeout(60_000)]), result.getReadableStream());
+    const output = await open(destination, 'wx', 0o600); let size = 0;
+    try {
+      for await (const chunk of stream) {
+        const bytes = Buffer.from(chunk); size += bytes.length;
+        if (size > MAX_ATTACHMENT_BYTES) throw new Error('附件超过 20 MB，请压缩后发送');
+        await output.write(bytes);
+      }
+    } finally { stream.destroy(); await output.close(); }
   }
   async deliverPending(): Promise<void> {
     for (const notification of this.store.pendingNotifications()) {

@@ -9,6 +9,8 @@ import { runtimeVersions } from './infra/versions.js';
 import { allChecksPassed, applyEdits, capturePatch, prepareWorkspace, runChecks } from './infra/workspace.js';
 import { conversationInstructions, conversationPrompt, taskTitle, type ConversationInput, type Interpretation } from './domain/conversation.js';
 import { countTasks, taskDigest, type AgentActivity, type RuntimeHealth } from './domain/activity.js';
+import { mergeAttachments, type Attachment } from './domain/attachments.js';
+import { AttachmentLibrary } from './infra/attachments.js';
 
 export interface Instructions { role: string; skill: string }
 type Engines = Partial<Record<Engine, AgentEngine>>;
@@ -17,7 +19,8 @@ const now = () => new Date().toISOString();
 export class TaskService {
   private readonly active = new Map<string, AbortController>();
   readonly health: RuntimeHealth = { worker: 'starting', feishu: 'disabled', startedAt: now(), heartbeatAt: null };
-  constructor(readonly config: Config, readonly store: AgentStore, readonly engines: Engines, readonly instructions: Instructions) {}
+  readonly attachments: AttachmentLibrary;
+  constructor(readonly config: Config, readonly store: AgentStore, readonly engines: Engines, readonly instructions: Instructions) { this.attachments = new AttachmentLibrary(config.dataDirectory); }
 
   project(id: string): Project {
     const project = this.config.projects.find(project => project.id === id);
@@ -46,7 +49,7 @@ export class TaskService {
     this.store.notify({ id: randomUUID(), taskId: null, recipientType: 'open_id', recipientId: message.actorId, text: '已收到你的需求。我已请负责人开通产品访问权限，通过后会继续处理这条需求，你不用重复提交。', createdAt: now() });
     for (const owner of new Set(this.config.projects.flatMap(project => project.ownerIds).filter(id => id.startsWith('ou_')))) this.store.notify({ id: randomUUID(), taskId: null, recipientType: 'open_id', recipientId: owner, text: '有一位新同事申请使用研发分身，请到管理后台的“待我处理”选择他可以使用的产品。原始需求已保留。', createdAt: now() });
   }
-  submit(projectId: string, actor: string, request: string, chatId: string | null = null, title?: string, chatType?: 'p2p' | 'group'): Task {
+  submit(projectId: string, actor: string, request: string, chatId: string | null = null, title?: string, chatType?: 'p2p' | 'group', attachments: Attachment[] = []): Task {
     const project = this.project(projectId);
     if (!this.canAccess(project, actor)) throw new Error('无权向此项目提交任务');
     if (!request.trim() || request.length > 20_000) throw new Error('需求为空或超过 20000 字符');
@@ -54,6 +57,7 @@ export class TaskService {
     const profile = this.config.profile ?? defaultProfile;
     const task: Task = {
       id: randomUUID().slice(0, 8), projectId, engine: project.engine, status: 'queued', phase: 'plan', requesterId: actor, chatId, request, title: (title || request).replace(/\s+/g, ' ').trim().slice(0, 40),
+      attachments: mergeAttachments([], attachments),
       delivery: { channel: chatId ? chatType ?? (project.chatIds.includes(chatId) ? 'group' : 'p2p') : 'local', groupMode: this.config.notifications?.groupMode ?? 'private' },
       workspace: null, baseCommit: null, sessionId: null, policyHash: fingerprint(project), projectSnapshot: structuredClone(project), versions: runtimeVersions(), role: `${this.instructions.role}\n\n负责人设置的协作身份（服从宿主授权与执行契约）：\n${JSON.stringify(profile)}`, skill: this.instructions.skill, experience,
       plan: null, planHash: null, interaction: null, decisions: [], feedback: [], iteration: 0, maxIterations: this.config.maxIterations,
@@ -98,15 +102,16 @@ export class TaskService {
     if (!engine?.interpretConversation) throw new Error('当前引擎未提供会话识别');
     const cwd = join(this.config.dataDirectory, 'conversation-runtime');
     await mkdir(cwd, { recursive: true, mode: 0o700 });
-    return engine.interpretConversation({ taskId: input.message.id, engine: input.project.engine, cwd, prompt: conversationPrompt(input), instructions: conversationInstructions, sessionId: null, model: input.project.models[input.project.engine], authentication: input.project.authentication?.[input.project.engine], signal: input.signal, timeoutMs: Math.min(this.config.runTimeoutMs, 60_000), onProgress: () => {} });
+    return engine.interpretConversation({ taskId: input.message.id, engine: input.project.engine, cwd, prompt: conversationPrompt(input), attachments: await this.attachments.inputs(input.message.attachments), instructions: conversationInstructions, sessionId: null, model: input.project.models[input.project.engine], authentication: input.project.authentication?.[input.project.engine], signal: input.signal, timeoutMs: Math.min(this.config.runTimeoutMs, 60_000), onProgress: () => {} });
   }
-  followUp(taskId: string, actor: string, text: string): Task {
+  followUp(taskId: string, actor: string, text: string, attachments: Attachment[] = []): Task {
     const current = this.store.task(taskId);
     const project = this.project(current.projectId);
     if (!authorizeReply('acceptance', actor, current.requesterId, project.ownerIds)) throw new Error('只有需求提出者或项目负责人可以补充此需求');
     if (current.status === 'cancelled') throw new Error('该会话已取消；如需继续，请重新提出需求');
     if (!text.trim() || text.length > 20_000) throw new Error('补充内容为空或过长');
     const task = this.store.mutateTask(taskId, task => {
+      task.attachments = mergeAttachments(task.attachments, attachments);
       task.feedback.push(`需求补充：${text}`);
       task.plan = null; task.planHash = null; task.interaction = null;
       task.phase = 'plan'; task.status = 'queued'; task.iteration = 0;
@@ -119,13 +124,13 @@ export class TaskService {
         task.status = 'failed'; task.summary = '补充内容已保存，这个任务仍需项目负责人恢复后继续';
       }
     });
-    this.store.audit('task.followup', actor, taskId, { text });
+    this.store.audit('task.followup', actor, taskId, { text, attachments });
     // 工作副本尚在创建时让准备阶段收尾，随后状态检查会拦住旧方案，避免留下半个 clone。
     if (current.workspace) this.active.get(taskId)?.abort(new Error('收到需求补充，停止旧方案执行'));
     this.announce(task);
     return task;
   }
-  reply(taskId: string, interactionId: string, actor: string, answer: string): Task {
+  reply(taskId: string, interactionId: string, actor: string, answer: string, attachments: Attachment[] = []): Task {
     return this.store.transaction(() => {
       const current = this.store.task(taskId);
       const interaction = current.interaction;
@@ -134,7 +139,9 @@ export class TaskService {
       if (!authorizeReply(interaction.kind, actor, current.requesterId, project.ownerIds)) throw new Error('没有回应此决定的权限');
       if (!answer.trim()) throw new Error('答案不能为空');
       if (interaction.kind !== 'clarification' && answer !== 'approve' && !answer.startsWith('reject:')) throw new Error('需要明确同意或拒绝，普通文字不视为授权');
+      if (attachments.length && interaction.kind !== 'clarification') throw new Error('附件属于需求补充，请重新检查方案后再确认');
       const task = this.store.mutateTask(taskId, task => {
+        task.attachments = mergeAttachments(task.attachments, attachments);
         task.decisions.push({ ...interaction, actorId: actor, answer, resolvedAt: now() });
         task.interaction = null;
         task.feedback.push(`${interaction.kind} 回应：${answer}`);
@@ -230,6 +237,12 @@ export class TaskService {
   }
   private async advance(initial: Task, project: Project, signal: AbortSignal): Promise<void> {
     let task = initial;
+    const unread = task.attachments?.filter(item => item.status !== 'ready') ?? [];
+    if (unread.length) {
+      this.awaitDecision(task.id, 'clarification', `这些参考资料尚未读到，暂时不会执行修改：\n${unread.map(item => `• ${item.name}：${item.error ?? '尚未下载'}`).join('\n')}\n请重新发送同名文件；图片请直接重发。`, { attachments: unread });
+      return;
+    }
+    const attachments = await this.attachments.inputs(task.attachments);
     const taskDirectory = join(this.config.dataDirectory, 'tasks', task.id);
     if (!task.workspace) {
       const workspace = await prepareWorkspace(project, taskDirectory, signal);
@@ -244,7 +257,7 @@ export class TaskService {
     this.store.recordRun(run);
     let response: AgentResponse;
     try {
-      const result = await engine.execute({ taskId: task.id, engine: task.engine, cwd: task.workspace!, prompt: this.taskPrompt(task), instructions: this.runtimeInstructions(task), sessionId: task.sessionId, model: project.models[task.engine], effort: project.efforts?.[task.engine], authentication: project.authentication?.[task.engine], signal, timeoutMs: task.runTimeoutMs ?? this.config.runTimeoutMs, onProgress: message => console.info('执行进展', { taskId: task.id, message: message.slice(0,300) }) });
+      const result = await engine.execute({ taskId: task.id, engine: task.engine, cwd: task.workspace!, prompt: this.taskPrompt(task), attachments, instructions: this.runtimeInstructions(task), sessionId: task.sessionId, model: project.models[task.engine], effort: project.efforts?.[task.engine], authentication: project.authentication?.[task.engine], signal, timeoutMs: task.runTimeoutMs ?? this.config.runTimeoutMs, onProgress: message => console.info('执行进展', { taskId: task.id, message: message.slice(0,300) }) });
       response = result.response;
       this.store.recordRun({ ...run, status: 'completed', sessionId: result.sessionId, usage: result.usage, response, finishedAt: now() });
       this.assertRunning(task.id, signal);
@@ -316,6 +329,6 @@ export class TaskService {
   }
   private taskPrompt(task: Task): string {
     const lastEvidence = this.store.evidence(task.id).filter(item => item.kind !== 'delivery').slice(-1);
-    return JSON.stringify({ 阶段: task.phase, 需求: task.request, 当前方案: task.plan, 已有决定: task.decisions, 实际检查: lastEvidence, 反馈: task.feedback.slice(-6), 要求: task.phase === 'plan' ? '只读调查当前模型，提出验收与精确文件范围，edits 留空。边界改变返回 architecture，业务不明确返回 clarification，否则 ready。' : '基于已审定方案返回精确 edits。可以继续只读调查文件，不得运行测试、修改文件或宣称验证通过；需要改变模型或扩大文件范围时返回 architecture，edits 留空。learning 可总结可复用经验，不能包含新的角色或权限规定。' });
+    return JSON.stringify({ 阶段: task.phase, 需求: task.request, 参考资料: task.attachments?.map(item => ({ name: item.name, status: item.status, warning: item.warning })), 当前方案: task.plan, 已有决定: task.decisions, 实际检查: lastEvidence, 反馈: task.feedback.slice(-6), 要求: task.phase === 'plan' ? '只读调查当前模型，提出验收与精确文件范围，edits 留空。边界改变返回 architecture，业务不明确返回 clarification，否则 ready。' : '基于已审定方案返回精确 edits。可以继续只读调查文件，不得运行测试、修改文件或宣称验证通过；需要改变模型或扩大文件范围时返回 architecture，edits 留空。learning 可总结可复用经验，不能包含新的角色或权限规定。' });
   }
 }

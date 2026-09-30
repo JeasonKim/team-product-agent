@@ -101,7 +101,7 @@ export class Management {
       store.notify({ id: randomUUID(), taskId: null, recipientType: 'open_id', recipientId: request.actorId, text: grant ? `已开通「${this.service.project(projectId).name}」，现在继续处理你之前的需求。` : '负责人暂未开通访问权限，可以直接与他确认负责的产品。', createdAt: new Date().toISOString() });
       if (grant) {
         // 原群可能属于另一产品，授权后的需求统一续到该成员的私聊上下文。
-        const message = { ...request.message, id: `access:${id}`, chatId: `private:${request.actorId}`, chatType: 'p2p' as const, replyTo: null };
+        const message = { ...request.message, id: `access:${id}`, chatId: `private:${request.actorId}`, chatType: 'p2p' as const, replyTo: null, source: request.message.source ?? { messageId: request.message.id, chatId: request.message.chatId } };
         store.saveChannel(JSON.stringify([message.chatId, message.actorId]), { projectId, selection: null });
         store.enqueueMessage(message);
       }

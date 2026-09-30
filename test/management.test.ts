@@ -9,6 +9,7 @@ import { loadConfig, type Config } from '../src/config.js';
 import { Management } from '../src/management.js';
 import { startAdmin } from '../src/admin/server.js';
 import type { ConversationInterpreter } from '../src/domain/conversation.js';
+import { attachment } from '../src/domain/attachments.js';
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); });
@@ -70,6 +71,20 @@ describe('私聊入口与安静的群聊', () => {
 });
 
 describe('负责人管理与配置追溯', () => {
+  it('附件下载需要管理权限且限定在所属任务，原始文件不会作为网页执行', async () => {
+    const f = await fixture();
+    const assets = await f.service.attachments.receive([attachment('om_file', 'file_demo', 'file', '说明.html')], async (_a, path) => { await writeFile(path, '<script>alert(1)</script>'); }, new AbortController().signal);
+    const task = f.service.submit('demo', 'ou_user', '参考文档调整', null, undefined, undefined, assets);
+    const other = f.service.submit('demo', 'ou_user', '另一个任务');
+    const admin = await startAdmin(f.management, { port: 0 }); cleanups.push(admin.close);
+    const path = `/api/tasks/${task.id}/attachments/${assets[0]!.id}`;
+    expect((await fetch(admin.origin + path)).status).toBe(401);
+    const headers = { authorization: `Bearer ${admin.token}` };
+    const response = await fetch(admin.origin + path, { headers });
+    expect(response.status).toBe(200); expect(response.headers.get('content-disposition')).toContain('attachment;');
+    expect(response.headers.get('content-type')).toBe('application/octet-stream'); expect(await response.text()).toContain('<script>');
+    expect((await fetch(`${admin.origin}/api/tasks/${other.id}/attachments/${assets[0]!.id}`, { headers })).status).not.toBe(200);
+  });
   it('自动评估只在验收后发起，每个候选仅一次；失败不会无限重试', async () => {
     const f = await fixture(); f.config.projects[0]!.autoEvaluate = true; f.config.projects[0]!.evaluationManifest = join(f.root,'missing-cases.json');
     const task=f.service.submit('demo','ou_user','来源');

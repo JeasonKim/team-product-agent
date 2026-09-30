@@ -10,8 +10,8 @@ import type { Management } from './management.js';
 export async function runWorker(service: TaskService, useFeishu: boolean, once: boolean, management?: Management, port = 4318, onReady?: () => Promise<void>): Promise<void> {
   const release = await acquireWorkerLock(join(service.config.dataDirectory, 'worker.lock'));
   const routingController = new AbortController();
-  const router = new MessageRouter(service, service, routingController.signal);
   let gateway: FeishuGateway | undefined;
+  const router = new MessageRouter(service, service, routingController.signal, (message, signal) => gateway ? gateway.prepareMessage(message, service.attachments, signal) : Promise.resolve(message));
   let stopping = false;
   let delivery: Promise<void> | undefined;
   let routing: Promise<void> | undefined;

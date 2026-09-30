@@ -7,6 +7,7 @@ import type { Config } from '../src/config.js';
 import { AgentStore } from '../src/infra/store.js';
 import { executeCommand } from '../src/infra/process.js';
 import { TaskService } from '../src/service.js';
+import { attachment } from '../src/domain/attachments.js';
 
 const answer = (patch: Partial<AgentResponse> = {}): AgentResponse => ({ decision: 'ready', summary: '修复计算', rationale: '保持原接口', question: null, affectedPaths: ['math.mjs'], acceptance: ['两数相加正确'], edits: [], learning: null, ...patch });
 async function fixture(engine: Engine, answers: AgentResponse[], beforeResponse?: (request: EngineRequest) => Promise<void>) {
@@ -29,6 +30,28 @@ async function fixture(engine: Engine, answers: AgentResponse[], beforeResponse?
 }
 
 describe.each<Engine>(['claude', 'codex'])('%s 任务业务契约', engine => {
+  it('图片与文档贯穿调查、实现和恢复，资料不进入产品补丁', async () => {
+    const requests: EngineRequest[] = [];
+    const f = await fixture(engine, [answer(), answer({ edits: [{ path: 'math.mjs', before: 'a - b', after: 'a + b' }] })], async request => { requests.push(request); });
+    const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a4m8AAAAASUVORK5CYII=', 'base64');
+    const assets = await f.service.attachments.receive([attachment('om_img', 'img_demo', 'image'), attachment('om_file', 'file_demo', 'file', '说明.txt')], async (item, path) => { await writeFile(path, item.kind === 'image' ? image : '修复加法，保留原接口'); }, new AbortController().signal);
+    const task = f.service.submit('demo', 'requester', '按照参考资料修复', null, undefined, undefined, assets);
+    await f.service.drain();
+    expect(f.store.task(task.id).status).toBe('ready'); expect(requests).toHaveLength(2);
+    expect(requests.every(request => request.attachments?.length === 2 && request.attachments.every(item => !item.path.startsWith(request.cwd)))).toBe(true);
+    const patch = await readFile(f.store.evidence(task.id).find(item => item.kind === 'delivery')!.artifact!, 'utf8'); expect(patch).not.toContain('attachments/');
+    expect(f.store.task(task.id).attachments).toEqual(assets); f.store.close();
+  });
+  it('资料读取失败只询问需求者，不让模型猜测；重发同名资料后可继续', async () => {
+    const f = await fixture(engine, []);
+    const failed = { ...attachment('om_fail', 'file_demo', 'file', '说明.txt'), status: 'failed' as const, error: '下载失败' };
+    const task = f.service.submit('demo', 'requester', '按文件修复', null, undefined, undefined, [failed]);
+    await f.service.runNext();
+    expect(f.calls()).toBe(0); expect(f.store.task(task.id).interaction?.kind).toBe('clarification');
+    const ready = await f.service.attachments.receive([attachment('om_retry', 'file_retry', 'file', '说明.txt')], async (_a, path) => { await writeFile(path, '修复加法'); }, new AbortController().signal);
+    f.service.followUp(task.id, 'requester', '重新发送了', ready);
+    expect(f.store.task(task.id).attachments).toEqual(ready); expect(f.store.task(task.id).status).toBe('queued'); f.store.close();
+  });
   it('新默认模型与身份不打断旧需求，执行实际使用创建时的模型与推理级别', async () => {
     const requests: EngineRequest[] = [];
     const f = await fixture(engine, [answer(), answer({ edits: [{ path: 'math.mjs', before: 'a - b', after: 'a + b' }] })], async request => { requests.push(request); });

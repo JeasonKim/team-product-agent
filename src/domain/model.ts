@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Project } from '../config.js';
 import type { Interpretation } from './conversation.js';
+import type { Attachment, EngineAttachment } from './attachments.js';
 
 export const engineSchema = z.enum(['claude', 'codex']);
 export type Engine = z.infer<typeof engineSchema>;
@@ -44,6 +45,7 @@ export interface Task {
   chatId: string | null;
   delivery?: { channel: 'group' | 'p2p' | 'local'; groupMode: 'private' | 'milestones' | 'group' };
   request: string;
+  attachments?: Attachment[];
   title?: string;
   workspace: string | null;
   baseCommit: string | null;
@@ -79,6 +81,7 @@ export interface EngineRequest {
   engine: Engine;
   cwd: string;
   prompt: string;
+  attachments?: EngineAttachment[];
   instructions: string;
   sessionId: string | null;
   model?: string;
@@ -140,6 +143,12 @@ export interface IncomingMessage {
   text: string;
   replyTo: string | null;
   createdAt?: string;
+  attachments?: Attachment[];
+  messageType?: string;
+  needsHydration?: boolean;
+  source?: { messageId: string; chatId: string };
+  addressedToBot?: boolean;
+  problem?: string;
 }
 export interface Notification {
   id: string;

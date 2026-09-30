@@ -6,6 +6,7 @@ import { fingerprint } from '../src/domain/policy.js';
 import type { Config } from '../src/config.js';
 import type { ConversationInterpreter, ConversationDecision } from '../src/domain/conversation.js';
 import type { InteractionKind, Task } from '../src/domain/model.js';
+import { attachment } from '../src/domain/attachments.js';
 
 const decision = (patch: Partial<ConversationDecision> = {}): ConversationDecision => ({ intent: 'new', taskId: null, title: '价格展示', confidence: 'high', candidates: [], explanation: '独立需求', response: '', ...patch });
 function fixture() {
@@ -34,6 +35,51 @@ function fixture() {
 }
 
 describe('面向普通同事的会话路由', () => {
+  it('先发图片再说明需求，附件跨路由器重建保留且不凭空开工', async () => {
+    const f = fixture();
+    const image = { ...attachment('img-message', 'img_demo', 'image'), status: 'ready' as const };
+    f.store.enqueueMessage({ id: 'img-message', actorId: 'owner', chatId: 'dm', chatType: 'p2p', text: '', replyTo: null, attachments: [image], createdAt: new Date().toISOString() });
+    await f.router.dispatchPending();
+    expect(f.store.tasks()).toHaveLength(0); expect(f.infer).not.toHaveBeenCalled();
+    f.store.enqueueMessage({ id: 'describe', actorId: 'owner', chatId: 'dm', chatType: 'p2p', text: '把商品卡片改成图里的效果', replyTo: null, createdAt: new Date().toISOString() });
+    await new MessageRouter(f.service, { interpret: f.infer }).dispatchPending();
+    expect(f.store.tasks()[0]?.attachments).toEqual([image]);
+    expect(f.store.tasks()[0]?.request).toBe('把商品卡片改成图里的效果');
+  });
+  it('连续补图回到同一个会话，不把附件当成批准；用户消息也可被引用', async () => {
+    const f = fixture(); await f.send('把卡片改成圆角'); const task = f.store.tasks()[0]!; f.hold(task);
+    const image = { ...attachment('image-followup', 'img_demo', 'image'), status: 'ready' as const };
+    f.infer.mockResolvedValue({ decision: decision({ intent: 'approve', taskId: task.id }), usage: null, sessionId: null });
+    f.store.enqueueMessage({ id: 'image-followup', actorId: 'owner', chatId: 'chat', text: '同意', replyTo: null, attachments: [image], createdAt: new Date().toISOString() });
+    await f.router.dispatchPending();
+    expect(f.store.task(task.id).decisions).toHaveLength(0); expect(f.store.task(task.id).attachments).toEqual([image]);
+    expect(f.store.task(task.id).phase).toBe('plan'); expect(f.store.messageLink('image-followup')?.taskId).toBe(task.id);
+  });
+  it('附件归属不明时列会话标题，数字选择应用原附件；别人不能借用', async () => {
+    const f = fixture(); const a = f.submit('价格展示'); const b = f.submit('订单排序');
+    f.infer.mockResolvedValue({ decision: decision({ intent: 'ambiguous', candidates: [a.id,b.id], confidence: 'low' }), usage: null, sessionId: null });
+    const image = { ...attachment('image-ambiguous', 'img_demo', 'image'), status: 'ready' as const };
+    f.store.enqueueMessage({ id: 'image-ambiguous', actorId: 'owner', chatId: 'chat', text: '这个参考', replyTo: null, attachments: [image], createdAt: new Date().toISOString() });
+    await f.router.dispatchPending(); await f.send('第二个', 'other');
+    expect(f.store.task(b.id).attachments ?? []).toHaveLength(0);
+    await f.send('第二个'); expect(f.store.task(b.id).attachments).toEqual([image]); expect(f.store.task(a.id).attachments ?? []).toHaveLength(0);
+    expect(f.store.messageLink('image-ambiguous')?.taskId).toBe(b.id);
+  });
+  it('带附件的描述还需澄清时保留资料，下一句补充不要求重发', async () => {
+    const f = fixture();
+    const image = { ...attachment('unclear-image', 'img_demo', 'image'), status: 'ready' as const };
+    f.infer.mockResolvedValueOnce({ decision: decision({ intent: 'chat', response: '需要改哪里？' }), usage: null, sessionId: null });
+    f.store.enqueueMessage({ id: 'unclear-image', actorId: 'owner', chatId: 'chat', text: '看看这个', replyTo: null, attachments: [image], createdAt: new Date().toISOString() });
+    await f.router.dispatchPending(); expect(f.store.tasks()).toHaveLength(0);
+    await f.send('把价格卡片改成参考图的布局');
+    expect(f.store.tasks()[0]?.attachments).toEqual([image]);
+  });
+  it('群里无 @ 的引用只有已知且可见的任务消息才接收，普通成员不能引用别人的私聊', async () => {
+    const f = fixture(); const task = f.submit('价格展示'); const quoted = f.hold(task);
+    const send = async (id: string, replyTo: string) => { f.store.enqueueMessage({ id, actorId: 'owner', chatId: 'chat', chatType: 'group', addressedToBot: false, text: '', replyTo, attachments: [{ ...attachment(id, 'img_demo', 'image'), status: 'ready' }], createdAt: new Date().toISOString() }); await f.router.dispatchPending(); };
+    await send('unrelated', 'not-our-message'); expect(f.infer).not.toHaveBeenCalled();
+    await send('quoted', quoted); expect(f.store.task(task.id).attachments).toHaveLength(1);
+  });
   it('用户明确说新需求时，不因内容接近已完成需求而合并回历史会话', async () => {
     const f=fixture(); const old=f.submit('修改空订单提示'); f.store.mutateTask(old.id,t=>{t.status='completed';});
     f.infer.mockResolvedValue({decision:decision({intent:'followup',taskId:old.id}),usage:null,sessionId:null});

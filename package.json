@@ -38,6 +38,8 @@
     "@larksuiteoapi/node-sdk": "1.74.0",
     "@openai/codex-sdk": "0.158.0",
     "better-sqlite3": "13.0.3",
+    "mammoth": "1.13.0",
+    "pdfjs-dist": "5.4.296",
     "zod": "4.6.5"
   },
   "devDependencies": {

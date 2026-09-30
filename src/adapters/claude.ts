@@ -1,10 +1,23 @@
-import { query, type Options, type HookCallback } from '@anthropic-ai/claude-agent-sdk';
+import { query, type Options, type HookCallback, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { readFile } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 import { responseJsonSchema, responseSchema, type AgentEngine, type EngineRequest, type EngineResult, type Usage } from '../domain/model.js';
 import { conversationJsonSchema, conversationSchema, type Interpretation } from '../domain/conversation.js';
 import { minimalEnvironment } from '../infra/process.js';
 import { assertSafePath } from '../infra/workspace.js';
 import { claudeEffortSchema } from '../config.js';
+import { referencePrompt } from './inputs.js';
+
+async function* claudeInput(request: EngineRequest, text: string): AsyncGenerator<SDKUserMessage> {
+  const content: Exclude<SDKUserMessage['message']['content'], string> = [{ type: 'text', text }];
+  for (const item of request.attachments ?? []) {
+    if (item.kind !== 'image') continue;
+    const mediaType = item.mimeType;
+    if (mediaType !== 'image/png' && mediaType !== 'image/jpeg' && mediaType !== 'image/gif' && mediaType !== 'image/webp') throw new Error('Claude 不支持这个图片格式');
+    content.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: (await readFile(item.path)).toString('base64') } });
+  }
+  yield { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, session_id: request.sessionId ?? undefined };
+}
 
 export class ClaudeEngine implements AgentEngine {
   readonly id = 'claude' as const;
@@ -51,7 +64,8 @@ export class ClaudeEngine implements AgentEngine {
     };
     let result: { response: unknown; sessionId: string; usage: Usage } | undefined;
     try {
-      for await (const message of query({ prompt: request.prompt, options })) {
+      const prompt = await referencePrompt(request);
+      for await (const message of query({ prompt: request.attachments?.some(item => item.kind === 'image') ? claudeInput(request, prompt) : prompt, options })) {
         abortController.signal.throwIfAborted();
         if (message.type === 'assistant') request.onProgress('Claude 正在调查和生成方案');
         if (message.type === 'result') {

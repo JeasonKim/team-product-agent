@@ -22,7 +22,7 @@ export async function startAdmin(management: Management, options: { port: number
     response.setHeader('cache-control', 'no-store');
     response.setHeader('x-content-type-options', 'nosniff');
     response.setHeader('referrer-policy', 'no-referrer');
-    response.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    response.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     void (async () => {
       if (request.headers.host !== new URL(origin).host || (request.headers.origin && request.headers.origin !== origin)) { send(response, 403, { error: '仅允许本机管理页面访问' }); return; }
       const path = new URL(request.url ?? '/', origin).pathname;
@@ -36,6 +36,15 @@ export async function startAdmin(management: Management, options: { port: number
       if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) { send(response, 401, { error: '请使用本机 admin.url 中的管理链接打开；令牌不需要发到聊天中。' }); return; }
       if (request.method === 'GET' && path === '/api/state') { send(response, 200, management.state()); return; }
       if (request.method === 'GET' && path === '/api/models') { send(response, 200, await modelCatalog()); return; }
+      const attachmentRoute = /^\/api\/tasks\/([a-f0-9]{8})\/attachments\/([a-f0-9]{64})$/.exec(path);
+      if (request.method === 'GET' && attachmentRoute) {
+        const detail = management.taskDetail(attachmentRoute[1]!);
+        const item = detail.task.attachments?.find(item => item.id === attachmentRoute[2]);
+        if (!item || item.status !== 'ready') throw new Error('这个需求没有可下载的对应附件');
+        const file = await management.service.attachments.original(item);
+        response.writeHead(200, { 'content-type': item.mimeType?.startsWith('image/') ? item.mimeType : 'application/octet-stream', 'content-disposition': `attachment; filename="reference"; filename*=UTF-8''${encodeURIComponent(item.name).replace(/'/g, '%27')}` });
+        response.end(await readFile(file)); return;
+      }
       if (path === '/api/settings') {
         if (request.method === 'GET') { send(response, 200, management.settings()); return; }
         if (request.method === 'PUT') { const input = z.object({ config: z.unknown(), revision: z.string() }).strict().parse(await body(request)); send(response, 200, await management.saveSettings(input.config, input.revision)); return; }

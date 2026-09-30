@@ -1,13 +1,14 @@
-import { Codex, type ThreadOptions } from '@openai/codex-sdk';
+import { Codex, type ThreadOptions, type UserInput } from '@openai/codex-sdk';
 import { join } from 'node:path';
 import { responseJsonSchema, responseSchema, type AgentEngine, type EngineRequest, type EngineResult, type Usage } from '../domain/model.js';
 import { minimalEnvironment } from '../infra/process.js';
 import { applicationDirectory } from '../infra/paths.js';
 import { conversationJsonSchema, conversationSchema, type Interpretation } from '../domain/conversation.js';
 import { codexEffortSchema } from '../config.js';
+import { referencePrompt } from './inputs.js';
 
-export function codexReadOnlyFilesystem(cwd: string): string {
-  return `permissions.team_agent_read.filesystem={":minimal"="read",${JSON.stringify(cwd)}="read",${JSON.stringify(`${cwd}/**/.env*`)}="deny"}`;
+export function codexReadOnlyFilesystem(cwd: string, images: string[] = []): string {
+  return `permissions.team_agent_read.filesystem={":minimal"="read",${JSON.stringify(cwd)}="read",${images.map(path => `${JSON.stringify(path)}="read",`).join('')}${JSON.stringify(`${cwd}/**/.env*`)}="deny"}`;
 }
 export class CodexEngine implements AgentEngine {
   readonly id = 'codex' as const;
@@ -39,13 +40,15 @@ export class CodexEngine implements AgentEngine {
         permissions: { team_agent_read: { network: { enabled: false } } },
       },
       configOverrides: [
-        codexReadOnlyFilesystem(request.cwd),
+        codexReadOnlyFilesystem(request.cwd, request.attachments?.filter(item => item.kind === 'image').map(item => item.path)),
         `projects.${JSON.stringify(request.cwd)}.trust_level="untrusted"`,
       ],
     });
     const options: ThreadOptions = { model: request.model, workingDirectory: request.cwd, approvalPolicy: 'never', networkAccessEnabled: false, webSearchMode: 'disabled', threadSource: 'team-product-agent', skipGitRepoCheck: conversation, modelReasoningEffort: conversation ? 'low' : request.effort ? codexEffortSchema.parse(request.effort) : undefined };
     const thread = request.sessionId ? client.resumeThread(request.sessionId, options) : client.startThread(options);
-    const { events } = await thread.runStreamed(request.prompt, { outputSchema: schema, signal });
+    const prompt = await referencePrompt(request);
+    const images: UserInput[] = request.attachments?.filter(item => item.kind === 'image').map(item => ({ type: 'local_image', path: item.path })) ?? [];
+    const { events } = await thread.runStreamed(images.length ? [{ type: 'text', text: prompt }, ...images] : prompt, { outputSchema: schema, signal });
     let finalText = '';
     let sessionId = request.sessionId;
     let completed = false;

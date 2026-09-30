@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EngineRequest } from '../src/domain/model.js';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 const mocks = vi.hoisted(() => ({ query: vi.fn(), start: vi.fn(), resume: vi.fn(), constructor: vi.fn() }));
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query: mocks.query }));
 vi.mock('@openai/codex-sdk', () => ({ Codex: class { constructor(options: unknown) { mocks.constructor(options); } startThread = mocks.start; resumeThread = mocks.resume; } }));
@@ -10,6 +13,20 @@ const request = (engine: 'claude' | 'codex'): EngineRequest => ({ taskId: 'test'
 async function* frames(items: unknown[]) { for (const item of items) yield item; }
 afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
 describe('真实 SDK 事件适配契约（SDK 边界替身）', () => {
+  it('两套引擎都收到实际图片和文档文字；会话判断同样可看图', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test-key'); vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    const root = await mkdtemp(join(tmpdir(), 'agent-sdk-inputs-')); const image = join(root, 'image.png'); const document = join(root, 'text.txt');
+    await writeFile(image, 'image-bytes'); await writeFile(document, '新增按钮文字：立即体验');
+    const attachments: EngineRequest['attachments'] = [{ name: '参考图', kind: 'image', mimeType: 'image/png', path: image }, { name: '需求.docx', kind: 'text', mimeType: 'text/plain', path: document }];
+    const run = vi.fn(async (_input: unknown) => ({ events: frames([{ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(output) } }, { type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 20 } }]) }));
+    mocks.start.mockReturnValue({ id: 'o', runStreamed: run });
+    mocks.query.mockReturnValue(frames([{ type: 'result', subtype: 'success', session_id: 'c', structured_output: output, usage: {} }]));
+    await new CodexEngine().execute({ ...request('codex'), attachments });
+    expect(run.mock.calls[0]![0]).toEqual([expect.objectContaining({ type: 'text', text: expect.stringContaining('立即体验') }), { type: 'local_image', path: image }]);
+    await new ClaudeEngine().execute({ ...request('claude'), attachments });
+    const inputs = []; for await (const message of mocks.query.mock.calls[0]![0].prompt) inputs.push(message);
+    expect(inputs[0].message.content).toEqual([expect.objectContaining({ type: 'text', text: expect.stringContaining('立即体验') }), { type: 'image', source: { type: 'base64', media_type: 'image/png', data: Buffer.from('image-bytes').toString('base64') } }]);
+  });
   it('两套 SDK 收到各自的模型和推理级别，默认值不强行覆盖', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'test-key'); vi.stubEnv('OPENAI_API_KEY', 'test-key');
     mocks.query.mockReturnValue(frames([{ type: 'result', subtype: 'success', session_id: 'c', structured_output: output, usage: {} }]));

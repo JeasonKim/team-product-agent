@@ -84,6 +84,11 @@ export class AgentStore {
     return (this.db.prepare("SELECT payload FROM inbox WHERE status = 'pending' ORDER BY received_at, rowid LIMIT 50").all() as PayloadRow[]).map(row => JSON.parse(row.payload) as IncomingMessage);
   }
   acknowledgeMessage(id: string): void { this.db.prepare("UPDATE inbox SET status = 'done' WHERE id = ?").run(id); }
+  preserveMessage(message: IncomingMessage): void { this.db.prepare('UPDATE inbox SET payload = ? WHERE id = ?').run(JSON.stringify(message), message.id); }
+  linkIncoming(message: IncomingMessage, taskId: string): void {
+    const link: MessageLink = { messageId: message.id, taskId, interactionId: null, recipientType: message.chatType === 'group' ? 'chat_id' : 'open_id', recipientId: message.chatType === 'group' ? message.chatId : message.actorId, deliveredAt: message.createdAt ?? new Date().toISOString() };
+    this.db.prepare('INSERT OR IGNORE INTO message_links(id, task_id, interaction_id, payload) VALUES (?, ?, ?, ?)').run(link.messageId, link.taskId, null, JSON.stringify(link));
+  }
   notify(notification: Notification): void {
     this.db.prepare("INSERT OR IGNORE INTO outbox(id, status, payload) VALUES (?, 'pending', ?)").run(notification.id, JSON.stringify(notification));
   }
