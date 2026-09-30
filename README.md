@@ -18,7 +18,7 @@
 
 ## 本地启动
 
-需要 Node.js 22.12+、PNPM 10.11 和 Git。依赖和两套 SDK 已锁定在 `pnpm-lock.yaml`；Codex 使用随 SDK 安装的 0.158.0 运行时，不依赖全局 Codex 版本。
+默认使用 Node.js 20.19.4（`.nvmrc`），支持 20.19+、22.13+ 或 24+，还需要 PNPM 10.11 和 Git。依赖和两套 SDK 已锁定在 `pnpm-lock.yaml`；Codex 使用随 SDK 安装的 0.158.0 运行时，不依赖全局 Codex 版本。
 
 ```bash
 git clone https://github.com/JeasonKim/team-product-agent.git
@@ -29,6 +29,8 @@ pnpm build
 pnpm start init /你的产品Git仓库
 cp .env.example .env
 ```
+
+切换 Node.js 主版本后，在选定版本下运行 `pnpm install --frozen-lockfile` 和 `pnpm rebuild better-sqlite3`，让 SQLite 原生模块与当前 Node 匹配；已有任务数据保留。
 
 编辑 `agent.config.json` 和本机 `.env`：
 
