@@ -17,14 +17,16 @@ import { evaluateCandidate, promoteCandidate } from './improvement.js';
 import { Management } from './management.js';
 import { openAdmin } from './admin/open.js';
 
-const help = `团队产品 Agent\n\n准备：pnpm start init /你的产品仓库\n启动：pnpm serve\n后台：pnpm admin\n本地：pnpm start submit product "需求描述"\n执行：pnpm start run\n查看：pnpm start status [任务号]\n回应：pnpm start reply 任务号 待决编号 approve|reject:原因|业务答案\n取消：pnpm start cancel 任务号\n恢复：pnpm start retry 任务号\n切换：pnpm start engine 任务号 claude|codex\n诊断：pnpm start doctor\n经验：pnpm start candidates\n候选：pnpm start candidate 任务号 经验文件\n评估：pnpm start evaluate 候选号 场景文件\n晋升：pnpm start promote 候选号 评估编号\n\n可用 --config 指定配置文件；凭证放本机 .env。`;
+const help = `团队产品 Agent\n\n准备：pnpm start init /你的产品仓库\n一键调试：pnpm dev（直接运行源码，连接飞书并打开后台）\n一键运行：pnpm start（需先 pnpm build）\n只启服务：pnpm serve\n打开后台：pnpm admin\n本地调试：pnpm dev --no-feishu\n本地：pnpm start submit product "需求描述"\n执行：pnpm start run\n查看：pnpm start status [任务号]\n回应：pnpm start reply 任务号 待决编号 approve|reject:原因|业务答案\n取消：pnpm start cancel 任务号\n恢复：pnpm start retry 任务号\n切换：pnpm start engine 任务号 claude|codex\n诊断：pnpm start doctor\n经验：pnpm start candidates\n候选：pnpm start candidate 任务号 经验文件\n评估：pnpm start evaluate 候选号 场景文件\n晋升：pnpm start promote 候选号 评估编号\n\n可用 --config 指定配置文件，--port 调整端口，--no-open 禁止自动打开浏览器；凭证放本机 .env。`;
 
 async function main(): Promise<void> {
-  if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('需要 Node.js 22 或更高版本；请使用 pnpm start / pnpm start 所在的 Node 环境');
+  if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('需要 Node.js 22 或更高版本；请使用 pnpm start / pnpm dev 所在的 Node 环境');
   if (existsSync('.env')) loadEnvFile('.env');
-  const { positionals, values } = parseArgs({ allowPositionals: true, options: { config: { type: 'string', default: 'agent.config.json' }, port: { type: 'string', default: '4318' }, feishu: { type: 'boolean', default: false }, help: { type: 'boolean', short: 'h', default: false } } });
-  const [command, ...args] = positionals;
-  if (!command || values.help || command === 'help') { console.log(help); return; }
+  const { positionals, values } = parseArgs({ allowPositionals: true, allowNegative: true, options: { config: { type: 'string', default: 'agent.config.json' }, port: { type: 'string', default: '4318' }, feishu: { type: 'boolean' }, open: { type: 'boolean' }, help: { type: 'boolean', short: 'h', default: false } } });
+  const [requestedCommand, ...args] = positionals;
+  const defaultStart = !requestedCommand;
+  const command = requestedCommand ?? 'serve';
+  if (values.help || command === 'help') { console.log(help); return; }
   const required = (index: number) => { if (!args[index]) throw new Error(`缺少参数。\n${help}`); return args[index]; };
   const configPath = resolve(values.config!);
   if (command === 'init') {
@@ -51,7 +53,13 @@ async function main(): Promise<void> {
     switch (command) {
       case 'serve': {
         const port = Number(values.port); if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('后台端口应为 1024–65535');
-        await runWorker(service, values.feishu!, false, new Management(service, configPath), port); break;
+        const onReady = async () => {
+          console.info('日志显示在当前终端，按 Ctrl+C 停止服务。');
+          if (!(values.open ?? defaultStart)) return;
+          try { console.info(`已打开管理后台：${await openAdmin(config.dataDirectory)}`); }
+          catch (error) { console.warn(`服务保持运行，后台未自动打开：${error instanceof Error ? error.message : String(error)} 可另行运行 pnpm admin。`); }
+        };
+        await runWorker(service, values.feishu ?? defaultStart, false, new Management(service, configPath), port, onReady); break;
       }
       case 'run': {
         const started = new Date().toISOString();

@@ -7,7 +7,7 @@ import { acquireWorkerLock } from './infra/lock.js';
 import { startAdmin } from './admin/server.js';
 import type { Management } from './management.js';
 
-export async function runWorker(service: TaskService, useFeishu: boolean, once: boolean, management?: Management, port = 4318): Promise<void> {
+export async function runWorker(service: TaskService, useFeishu: boolean, once: boolean, management?: Management, port = 4318, onReady?: () => Promise<void>): Promise<void> {
   const release = await acquireWorkerLock(join(service.config.dataDirectory, 'worker.lock'));
   const routingController = new AbortController();
   const router = new MessageRouter(service, service, routingController.signal);
@@ -39,6 +39,7 @@ export async function runWorker(service: TaskService, useFeishu: boolean, once: 
     inboxTimer = setInterval(receive, 700);
     receive();
     console.info(useFeishu ? '服务已启动：飞书长连接 + 单任务执行队列' : '本地执行队列已启动');
+    if (!stopping) await onReady?.();
     while (!stopping) {
       const advanced = await service.runNext();
       if (once && !advanced) { await routing; if (!service.store.tasks('queued').length && !service.store.pendingMessages().length) break; }

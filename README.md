@@ -45,14 +45,21 @@ cp .env.example .env
 配置完成后，平时只需：
 
 ```bash
-# 终端一：启动飞书机器人、执行队列和后台
-pnpm serve
-
-# 终端二：在浏览器打开后台，自动使用当前访问令牌
-pnpm admin
+pnpm dev
 ```
 
-终端一保持运行，按 `Ctrl+C` 停止；Mac 需要在线且不休眠。后台地址为 `http://127.0.0.1:4318`，初次访问和服务重启后请用 `pnpm admin` 打开。这里的命令为前台启动，不会安装开机自启服务。
+这条命令直接运行源码，同时启动飞书机器人、执行队列和管理后台；连接就绪后自动在浏览器打开后台，不必先编译或另开终端。日志显示在当前终端，按 `Ctrl+C` 停止服务。修改 TypeScript 后停止并重新运行即可，不会因为保存文件而中断正在执行的需求。
+
+| 命令 | 用途 |
+| --- | --- |
+| `pnpm dev` | 一键启动，直接运行源码并打开后台 |
+| `pnpm start` | 一键启动已构建的版本，需先运行 `pnpm build` |
+| `pnpm serve` | 只启动飞书、队列和后台，不打开浏览器 |
+| `pnpm admin` | 打开正在运行的后台 |
+| `pnpm dev --no-feishu` | 只调试本机服务和后台，跳过飞书连接 |
+| `pnpm dev --no-open` | 一键启动时不自动打开浏览器 |
+
+可附加 `--port 4320` 指定端口，或 `--config /path/to/agent.config.json` 指定配置。后台默认地址为 `http://127.0.0.1:4318`；手动重新打开时运行 `pnpm admin`，自动使用当前访问令牌。重复启动会明确提示已有服务的 PID；浏览器打开失败时，服务仍继续运行。Mac 需要在线且不休眠。这些命令为前台启动，不会安装开机自启服务。
 
 先不接入飞书时，用 `pnpm start serve` 启动本机后台，或通过 CLI 试用：
 
@@ -204,7 +211,7 @@ pnpm exec node scripts/verify-conversations.mjs heldout
 
 源码入口是 `src/cli.ts`，生命周期在 `src/service.ts`，业务契约在 `src/domain/`，SDK 和飞书适配器在 `src/adapters/`，本机后台在 `src/admin/` 与 `resources/admin/`。项目约定见 [AGENTS.md](AGENTS.md)。
 
-修改后运行 `pnpm check`；开发调试可以使用 `pnpm dev serve`。更新到新代码后执行 `pnpm install --frozen-lockfile && pnpm build`，再重启服务。
+修改后运行 `pnpm check`；开发调试使用 `pnpm dev`，`pnpm dev --help` 查看全部命令。显式使用 `pnpm dev serve` 保持只启动本机服务的行为，可按需加 `--feishu` 和 `--open`。更新到新代码后执行 `pnpm install --frozen-lockfile && pnpm build`，再重启服务。
 
 `.env`、`agent.config.json`、默认数据目录、试验日志和本机验证截图均已排除在 Git 之外。备份或迁移时先停止服务，一并保留本机配置、数据目录、产品仓库和需要续接的 SDK 会话。历史记录含绝对路径，直接改目录后应保留旧路径兼容链接，或单独完成历史数据迁移；不应手工批量替换任务快照。
 
